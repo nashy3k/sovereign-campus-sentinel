@@ -1,0 +1,30 @@
+[
+  {
+    "scenario": "Truancy & Unauthorized Perimeter Loitering",
+    "slang_input": "Budak-budak ponteng duk lepak port belakang pagar dewan makan.",
+    "expected_translation": "Students skipping class loitering at unmonitored rear fence behind dining hall.",
+    "threat_level": "LOW",
+    "sop": "Dispatch Block B auxiliary warden for perimeter inspection."
+  },
+  {
+    "scenario": "Extortion & Student Intimidation",
+    "slang_input": "Tolong cikgu, budak form 5 duk pau duit budak junior dekat loker belakang.",
+    "expected_translation": "Senior students extorting money from junior students near the rear lockers.",
+    "threat_level": "HIGH",
+    "sop": "Immediate intervention by Discipline Master; isolate senior group."
+  },
+  {
+    "scenario": "Physical Altercation Escalation",
+    "slang_input": "Ada kecoh tolak-tolak dekat tangga blok C, nampak gaya budak nak gaduh besar.",
+    "expected_translation": "Aggressive shoving and confrontation at Block C staircase; escalating fistfight imminent.",
+    "threat_level": "CRITICAL",
+    "sop": "Sound local guardhouse alert; dispatch nearest patrol officers to Block C staircase."
+  },
+  {
+    "scenario": "Contraband / Substance Ingestion",
+    "slang_input": "Budak-budak duk hisap pod sembunyi dalam tandas hujung tingkat 2.",
+    "expected_translation": "Students surreptitiously using vape/e-cigarette devices in end toilet on 2nd floor.",
+    "threat_level": "MEDIUM",
+    "sop": "Prefect / Teacher on duty to conduct spot check at Level 2 restroom."
+  }
+]
