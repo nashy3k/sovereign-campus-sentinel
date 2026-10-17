@@ -35,6 +35,7 @@ using namespace esp_panel::board;
 #define WIFI_CONNECT_TIMEOUT_MS  20000
 #define WIFI_RETRY_INTERVAL_MS   10000
 #define FIELD_MAX_LEN        60
+#define RGB_BOUNCE_LINES     30  // must divide the panel height into an even number of chunks (600/30 = 20)
 
 #define COLOR_IDLE_BG    lv_color_hex(0x0B0F19)
 #define COLOR_ALERT_A    lv_color_hex(0xDC2626)
@@ -308,9 +309,10 @@ void setup()
     lcd->configFrameBufferNumber(LVGL_PORT_DISP_BUFFER_NUM);
 #if ESP_PANEL_DRIVERS_BUS_ENABLE_RGB && CONFIG_IDF_TARGET_ESP32S3
     auto lcd_bus = lcd->getBus();
-    // Anti-tearing uses more PSRAM bandwidth on ESP32-S3: enable the RGB bounce buffer
+    // Anti-tearing uses more PSRAM bandwidth on ESP32-S3: enable the RGB bounce buffer. Wi-Fi traffic competes
+    // for the same bandwidth and shows up as flicker on the 1024x600 panel, hence the larger buffer.
     if (lcd_bus->getBasicAttributes().type == ESP_PANEL_BUS_TYPE_RGB) {
-        static_cast<BusRGB *>(lcd_bus)->configRGB_BounceBufferSize(lcd->getFrameWidth() * 10);
+        static_cast<BusRGB *>(lcd_bus)->configRGB_BounceBufferSize(lcd->getFrameWidth() * RGB_BOUNCE_LINES);
     }
 #endif
 #endif
@@ -326,7 +328,7 @@ void setup()
     show_boot_status("Connecting to Wi-Fi...");
     WiFi.mode(WIFI_STA);
     WiFi.setHostname(SENTINEL_HOSTNAME);
-    WiFi.setSleep(false);  // keep latency low so alerts show immediately
+    WiFi.setSleep(true);   // modem sleep: far less radio activity competing with the RGB panel for memory bandwidth
     WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
     uint32_t start = millis();
     while (WiFi.status() != WL_CONNECTED && millis() - start < WIFI_CONNECT_TIMEOUT_MS) {
@@ -353,5 +355,5 @@ void loop()
 {
     server.handleClient();
     watch_wifi();
-    delay(2);
+    delay(10);  // 10 ms is plenty for alerts; polling faster only adds memory-bus contention
 }
