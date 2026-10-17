@@ -11,6 +11,11 @@ import cv2
 import numpy as np
 from openai import OpenAI
 
+from sentinel_alerts import (
+    DEFAULT_DISPLAY_URL, DEFAULT_DISPLAY_TOKEN, FIGHT_VERDICT_INSTRUCTION,
+    parse_fight_verdict, send_fight_alert, clear_display_alert, get_display_status,
+)
+
 # ==============================================================================
 # Page Configuration & Clean Dark HUD Theme
 # ==============================================================================
@@ -68,10 +73,12 @@ Your mission:
    - 'hisap vape' / 'pod' -> Contraband / Substance violation
    - 'tapau' -> Defeat / Overcome (threat context)
 3. Determine Severity Level: [LOW | MEDIUM | HIGH | CRITICAL].
-4. Output structured, professional operational advice for the on-duty security warden.
+4. Decide whether the footage shows a physical fight in progress (punching, kicking, grappling, or sustained violent shoving between people). Judge from the visual evidence only: a text tip alone, an argument, or playful horseplay without strikes is NOT a fight.
+5. Output structured, professional operational advice for the on-duty security warden.
+6. Finish your answer with one last line, exactly in this form: __VERDICT__
 
 Constraint: You run 100% locally with zero cloud egress under Malaysian PDPA standards.
-"""
+""".replace("__VERDICT__", FIGHT_VERDICT_INSTRUCTION)
 
 # ==============================================================================
 # Helper Functions: Video & LLM Triage
@@ -133,6 +140,39 @@ def parse_severity(text: str) -> str:
     idx = text.lower().find("severity")
     match = re.search(r"\b(" + "|".join(SEVERITY_LEVELS) + r")\b", text[idx:] if idx >= 0 else text)
     return match.group(1) if match else "UNKNOWN"
+
+TEXT_ONLY_INPUT = "Text only"  # input description when no footage was sent to the model
+
+@st.cache_data(ttl=15, show_spinner=False)
+def cached_display_status(base_url: str):
+    return get_display_status(base_url)
+
+def push_display_alert(clip: str, text: str) -> Dict[str, Any]:
+    """Send the fight alert to the ESP32 display; returns the outcome to store with the result."""
+    ok, err = send_fight_alert(display_url, display_token, clip, parse_severity(text))
+    return {"ok": ok, "error": err, "at": time.strftime("%H:%M:%S")}
+
+def store_result(results: Dict[str, Dict[str, Any]], key: str, tip: str, text: str,
+                 latency_ms: float, input_used: str, model: str) -> None:
+    """Save a triage result; if the model confirmed a fight on real footage, alert the ESP32 display."""
+    fight = None
+    if not is_inference_error(text) and input_used != TEXT_ONLY_INPUT:
+        fight = parse_fight_verdict(text)
+    entry = {"tip": tip, "text": text, "latency_ms": latency_ms, "input": input_used,
+             "model": model, "fight": fight, "alert": None}
+    if fight and display_enabled:
+        entry["alert"] = push_display_alert(key, text)
+    results[key] = entry
+
+def fight_label(res: Dict[str, Any]) -> str:
+    fight = res.get("fight")
+    return "🚨 FIGHT DETECTED" if fight else "No fight" if fight is False else "No verdict"
+
+def alert_label(res: Dict[str, Any]) -> str:
+    alert = res.get("alert")
+    if not alert:
+        return "-"
+    return f"Sent {alert['at']}" if alert["ok"] else f"Failed: {alert['error'][:60]}"
 
 # The app runs on this machine; only the clip (or keyframe) + prompt go to the DGX Spark's vLLM
 # server, reached through a port forwarded by NVIDIA Sync (or `ssh -L 9001:127.0.0.1:9001 <spark>`).
@@ -198,7 +238,7 @@ def call_local_dgx_spark(
         {"type": "text", "text": tip + "Analyze this CCTV keyframe:"},
         {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{frame_base64}"}}
     ] if frame_base64 else f"Analyze this incident report and normalize any slang: '{user_prompt}'"
-    keyframe_label = "Peak-motion keyframe" if frame_base64 else "Text only"
+    keyframe_label = "Peak-motion keyframe" if frame_base64 else TEXT_ONLY_INPUT
 
     start_time = time.perf_counter()
     try:
@@ -247,6 +287,33 @@ with st.sidebar:
                                 help="Off: send only the peak-motion keyframe. Falls back to the keyframe if the model rejects video.")
     disable_thinking = st.toggle("Fast mode (skip model reasoning)", value=True,
                                  help="Sends enable_thinking=False to Nemotron reasoning models")
+
+    st.divider()
+    st.subheader("🚨 ESP32 Alert Display")
+    display_enabled = st.toggle("Alert display on fight", value=True,
+                                help="When the model confirms a fight, show the warning on the Waveshare ESP32-S3 5-inch display")
+    display_url = st.text_input("Display URL", value=DEFAULT_DISPLAY_URL,
+                                help="Address of the ESP32 on the local network (mDNS name or IP)")
+    display_token = st.text_input("Display token", value=DEFAULT_DISPLAY_TOKEN, type="password",
+                                  help="Must match SENTINEL_TOKEN in the firmware's config.h")
+    if display_enabled:
+        display_status, display_error = cached_display_status(display_url)
+        if display_status is None:
+            st.error("Alert display unreachable. Check its power, Wi-Fi and URL.")
+            st.caption(f"`{display_error[:120]}`")
+        elif display_status.get("alert"):
+            st.warning("Display is showing an active alert.")
+        else:
+            st.success("Alert display online")
+        test_col, clear_col = st.columns(2)
+        if test_col.button("Test alert", use_container_width=True):
+            ok, err = send_fight_alert(display_url, display_token, "TEST CLIP", "TEST")
+            (st.toast if ok else st.error)("Test alert sent to display" if ok else f"Display error: {err}")
+            cached_display_status.clear()
+        if clear_col.button("Clear display", use_container_width=True):
+            ok, err = clear_display_alert(display_url, display_token)
+            (st.toast if ok else st.error)("Display cleared" if ok else f"Display error: {err}")
+            cached_display_status.clear()
 
     st.divider()
     st.subheader("🔒 Sovereignty Verification")
@@ -373,8 +440,7 @@ with right_col:
                 video_path=active_video_path if send_full_video else None,
                 disable_thinking=disable_thinking
             )
-        results[result_key] = {"tip": incident_tip, "text": result_text, "latency_ms": latency_ms,
-                               "input": input_used, "model": model_id}
+        store_result(results, result_key, incident_tip, result_text, latency_ms, input_used, model_id)
 
     if result_key in results:
         res = results[result_key]
@@ -384,7 +450,17 @@ with right_col:
         else:
             st.success(f"Triage Complete in {res['latency_ms']:.1f} ms (Running 100% on NVIDIA GB10)")
         st.markdown(f"### 📋 Copilot Operational Assessment: `{result_key}`")
-        st.metric("Severity Level", parse_severity(res["text"]))
+        sev_col, fight_col = st.columns(2)
+        sev_col.metric("Severity Level", parse_severity(res["text"]))
+        fight_col.metric("Fight Verdict", fight_label(res))
+        alert = res.get("alert")
+        if alert and alert["ok"]:
+            st.success(f"ESP32 display alerted at {alert['at']}: \"Fighting is detected. Please take immediate actions now!\"")
+        elif alert:
+            st.error(f"ESP32 display alert FAILED at {alert['at']}: {alert['error']}")
+            if st.button("🔁 Resend Alert to Display"):
+                results[result_key]["alert"] = push_display_alert(result_key, res["text"])
+                st.rerun()
         st.caption(f"Model: `{res.get('model', '?')}` · Input: {res.get('input', 'Peak-motion keyframe')}")
         st.info(res["text"])
 
@@ -397,6 +473,9 @@ with right_col:
         with act_col2:
             if st.button("❌ Dismiss: False Positive / Normal", use_container_width=True):
                 st.toast("Alert Logged as Dismissed.", icon="ℹ️")
+                if display_enabled:
+                    clear_display_alert(display_url, display_token)
+                    cached_display_status.clear()
 
 # ==============================================================================
 # Batch Triage: every clip in sample_videos/ (including uploaded videos)
@@ -422,8 +501,7 @@ if st.button("▶️ Run Triage on All Clips", disabled=not batch_files):
             video_path=clip_file if send_full_video else None,
             disable_thinking=disable_thinking
         )
-        results[fname] = {"tip": incident_tip, "text": text, "latency_ms": ms,
-                          "input": input_used, "model": model_id}
+        store_result(results, fname, incident_tip, text, ms, input_used, model_id)
     progress.empty()
 
 all_results = get_result_store()
@@ -433,6 +511,8 @@ if batch_done:
         [{
             "Clip": f,
             "Severity": parse_severity(all_results[f]["text"]),
+            "Fight": fight_label(all_results[f]),
+            "Display Alert": alert_label(all_results[f]),
             "Latency (ms)": round(all_results[f]["latency_ms"]),
             "Input": all_results[f].get("input", "Peak-motion keyframe"),
             "Model": all_results[f].get("model", "?"),
@@ -443,7 +523,7 @@ if batch_done:
     )
     for f in batch_done:
         res = all_results[f]
-        with st.expander(f"{parse_severity(res['text'])} · {f} · {res['latency_ms']:.0f} ms"):
+        with st.expander(f"{'🚨 ' if res.get('fight') else ''}{parse_severity(res['text'])} · {f} · {res['latency_ms']:.0f} ms"):
             vid_col, txt_col = st.columns([1, 2])
             with vid_col:
                 st.video(os.path.join(SAMPLE_VIDEO_DIR, f))
