@@ -12,6 +12,7 @@ from typing import Optional, Tuple
 from openai import OpenAI
 
 COMMON_ENDPOINTS = [
+    ("DGX Spark vLLM via NVIDIA Sync port forward (Port 9001)", "http://localhost:9001/v1"),
     ("vLLM / NIM (Default Port 8000)", "http://localhost:8000/v1"),
     ("Ollama (Port 11434)", "http://localhost:11434/v1"),
     ("Local Secondary Port 8080", "http://localhost:8080/v1"),
@@ -19,7 +20,7 @@ COMMON_ENDPOINTS = [
 
 def probe_endpoint(name: str, url: str) -> Optional[Tuple[OpenAI, str]]:
     print(f"[*] Testing {name} at {url}...")
-    client = OpenAI(base_url=url, api_key="spark-benchmark")
+    client = OpenAI(base_url=url, api_key="spark-benchmark", timeout=5.0, max_retries=0)
     try:
         models = client.models.list()
         if models and models.data:
@@ -44,7 +45,8 @@ def benchmark_latency(client: OpenAI, model_id: str):
         temperature=0.1
     )
     elapsed_ms = (time.perf_counter() - start) * 1000
-    reply = response.choices[0].message.content.strip()
+    # Reasoning models may spend all max_tokens thinking and return no content
+    reply = (response.choices[0].message.content or "<no answer: token budget used by reasoning>").strip()
     
     # Calculate tokens per second approximation
     token_count = response.usage.completion_tokens if hasattr(response, 'usage') and response.usage else 50

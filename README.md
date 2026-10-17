@@ -75,6 +75,29 @@ streamlit run app.py
 ```
 Open your browser at `http://localhost:8501`.
 
+### Air-Gapped Inference via NVIDIA Sync
+The dashboard runs on your laptop. The DGX Spark needs no internet: only the CCTV clip (or its peak-motion keyframe) and the incident text go to the Spark's local vLLM server, through a port that NVIDIA Sync forwards over its SSH link.
+
+1. **Connect the laptop to the Spark directly.** Put both on the same switch or Wi-Fi network, or use a direct Ethernet cable; no internet uplink is needed. In NVIDIA Sync, the device should show **Connected**. Sync finds the Spark by its mDNS name (`<hostname>.local`), so both machines must be on the same local network.
+2. **Serve the vision-language model on the Spark.** Run Nemotron 3.5 VL under vLLM on the Spark (for example on port `9001`). For full-clip triage, the server must accept video input.
+3. **Forward the inference port.** In NVIDIA Sync, open **Settings → your device → Custom ports/apps** and add a port forward for the vLLM port (for example `9001`). Sync then serves it on your laptop at `localhost:9001`. The equivalent manual tunnel uses the SSH alias that Sync writes to `~/.ssh/config`:
+   ```bash
+   ssh -f -N -o ServerAliveInterval=30 -L 9001:127.0.0.1:9001 <sync-device-alias>
+   ```
+4. **Verify:** `python probe_spark.py` should report the detected model.
+5. **Launch:** `streamlit run app.py`. The sidebar shows **Connected to Spark** and lists the served models. It selects `SENTINEL_MODEL` if that model is served, otherwise the first model with "vl" in its ID. Use **Upload Video** or the clip picker, and **Run Triage on All Clips** for batch runs. Uploaded clips are stored on the laptop in `sample_videos/`; they never leave it.
+
+Configuration (optional environment variables):
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `SENTINEL_API_URL` | `http://localhost:9001/v1` | Forwarded OpenAI-compatible endpoint |
+| `SENTINEL_MODEL` | `nvidia/nemotron-3.5-super-vl` | Preferred model ID served by vLLM |
+
+**Send full video clip** (sidebar, on by default) sends the whole clip as a `video_url`, so the model sees motion such as shoving or climbing, not one frame. If the server rejects video, the app retries with the peak-motion keyframe and labels the result accordingly. Keep clips small (for example 640×360, under 30 s).
+
+**Fast mode** (sidebar, on by default) sends `enable_thinking=False`. Nemotron reasoning models otherwise spend most of the token budget on hidden reasoning, which makes triage about 3× slower.
+
 ---
 
 ## 4. Key Files

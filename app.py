@@ -134,47 +134,90 @@ def parse_severity(text: str) -> str:
     match = re.search(r"\b(" + "|".join(SEVERITY_LEVELS) + r")\b", text[idx:] if idx >= 0 else text)
     return match.group(1) if match else "UNKNOWN"
 
+# The app runs on this machine; only the clip (or keyframe) + prompt go to the DGX Spark's vLLM
+# server, reached through a port forwarded by NVIDIA Sync (or `ssh -L 9001:127.0.0.1:9001 <spark>`).
+DEFAULT_ENDPOINT = os.environ.get("SENTINEL_API_URL", "http://localhost:9001/v1")
+DEFAULT_MODEL = os.environ.get("SENTINEL_MODEL", "nvidia/nemotron-3.5-super-vl")
+VIDEO_MIME = {".mp4": "video/mp4", ".mov": "video/quicktime", ".avi": "video/x-msvideo",
+              ".mkv": "video/x-matroska", ".webm": "video/webm"}
+
+@st.cache_data(ttl=15, show_spinner=False)
+def list_endpoint_models(base_url: str) -> Tuple[Optional[list], str]:
+    """Return (model ids, error) for the endpoint; short timeout so a dropped link fails fast."""
+    try:
+        client = OpenAI(base_url=base_url, api_key="local-spark-auth", timeout=3.0, max_retries=0)
+        return [m.id for m in client.models.list().data], ""
+    except Exception as e:
+        return None, str(e)
+
+def pick_default_model(models: list) -> int:
+    """Index of SENTINEL_MODEL if served, else the first vision-language ('vl') model, else 0."""
+    if DEFAULT_MODEL in models:
+        return models.index(DEFAULT_MODEL)
+    return next((i for i, m in enumerate(models) if "vl" in m.lower()), 0)
+
+def get_base64_video(video_path: str) -> Tuple[str, str]:
+    """Read a clip as (mime type, base64) for a video_url data URL."""
+    mime = VIDEO_MIME.get(os.path.splitext(video_path)[1].lower(), "video/mp4")
+    with open(video_path, "rb") as f:
+        return mime, base64.b64encode(f.read()).decode("utf-8")
+
 def call_local_dgx_spark(
     base_url: str,
     model_name: str,
     user_prompt: str,
-    frame_base64: Optional[str] = None
-) -> Tuple[str, float]:
-    """Execute local inference against the DGX Spark endpoint and measure latency."""
-    client = OpenAI(base_url=base_url, api_key="local-spark-auth")
-    messages = [{"role": "system", "content": SOVEREIGN_SYSTEM_PROMPT}]
-    
-    if frame_base64:
-        messages.append({
-            "role": "user",
-            "content": [
-                {"type": "text", "text": f"Incident Context & Slang Tip: '{user_prompt}'\nAnalyze this CCTV keyframe:"},
-                {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{frame_base64}"}}
-            ]
-        })
-    else:
-        messages.append({
-            "role": "user",
-            "content": f"Analyze this incident report and normalize any slang: '{user_prompt}'"
-        })
-    
-    start_time = time.perf_counter()
-    try:
+    frame_base64: Optional[str] = None,
+    video_path: Optional[str] = None,
+    disable_thinking: bool = True
+) -> Tuple[str, float, str]:
+    """Execute local inference against the DGX Spark endpoint and measure latency.
+
+    Sends the full clip when video_path is given; if the server rejects video input,
+    retries with the peak-motion keyframe. Returns (text, latency_ms, input description).
+    """
+    client = OpenAI(base_url=base_url, api_key="local-spark-auth", timeout=300.0)
+
+    def run(content) -> str:
         response = client.chat.completions.create(
             model=model_name,
-            messages=messages,
+            messages=[{"role": "system", "content": SOVEREIGN_SYSTEM_PROMPT},
+                      {"role": "user", "content": content}],
             temperature=0.2,
-            max_tokens=4096
+            max_tokens=4096,
+            # Nemotron reasoning models: skip the hidden thinking pass (~3x faster triage)
+            extra_body={"chat_template_kwargs": {"enable_thinking": False}} if disable_thinking else None
         )
-        elapsed_ms = (time.perf_counter() - start_time) * 1000
-        content = response.choices[0].message.content
-        if not content:
+        text = response.choices[0].message.content
+        if not text:
             # Reasoning models can spend the whole token budget thinking and return no answer
-            return "⚠️ Local Inference Error: model returned no answer (token budget exhausted?)", elapsed_ms
-        return content, elapsed_ms
+            raise RuntimeError("model returned no answer (token budget exhausted?)")
+        return text
+
+    tip = f"Incident Context & Slang Tip: '{user_prompt}'\n"
+    keyframe_content = [
+        {"type": "text", "text": tip + "Analyze this CCTV keyframe:"},
+        {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{frame_base64}"}}
+    ] if frame_base64 else f"Analyze this incident report and normalize any slang: '{user_prompt}'"
+    keyframe_label = "Peak-motion keyframe" if frame_base64 else "Text only"
+
+    start_time = time.perf_counter()
+    try:
+        if video_path:
+            mime, video_b64 = get_base64_video(video_path)
+            try:
+                text = run([
+                    {"type": "text", "text": tip + "Analyze this CCTV clip:"},
+                    {"type": "video_url", "video_url": {"url": f"data:{mime};base64,{video_b64}"}}
+                ])
+                return text, (time.perf_counter() - start_time) * 1000, "Full video clip"
+            except Exception as video_err:
+                if not frame_base64:
+                    raise
+                keyframe_label = f"Peak-motion keyframe (video rejected: {str(video_err)[:100]})"
+        text = run(keyframe_content)
+        return text, (time.perf_counter() - start_time) * 1000, keyframe_label
     except Exception as e:
-        elapsed_ms = (time.perf_counter() - start_time) * 1000
-        return f"⚠️ Local Inference Error: {str(e)}", elapsed_ms
+        return f"⚠️ Local Inference Error: {str(e)}", (time.perf_counter() - start_time) * 1000, keyframe_label
 
 # ==============================================================================
 # UI Layout & Execution
@@ -187,9 +230,24 @@ st.caption("Air-Gapped Institutional Safety Engine | GIGABYTE AI TOP ATOM (NVIDI
 # Sidebar Configuration
 with st.sidebar:
     st.header("⚙️ DGX Spark Runtime Config")
-    endpoint_url = st.text_input("Local API Endpoint", value="http://localhost:8000/v1")
-    model_id = st.text_input("Active Model ID", value="nvidia/nemotron-3.5-super-vl")
-    
+    endpoint_url = st.text_input("Local API Endpoint", value=DEFAULT_ENDPOINT,
+                                 help="vLLM port on the DGX Spark, forwarded to this machine by NVIDIA Sync")
+    available_models, endpoint_error = list_endpoint_models(endpoint_url)
+    if available_models:
+        st.success(f"Connected to Spark: {len(available_models)} model(s)")
+        model_id = st.selectbox("Active Model ID", available_models, index=pick_default_model(available_models))
+    else:
+        st.error("Spark endpoint unreachable. Check the NVIDIA Sync connection and port forward.")
+        st.caption(f"`{endpoint_error[:120]}`")
+        model_id = st.text_input("Active Model ID", value=DEFAULT_MODEL)
+    if st.button("🔄 Recheck Connection", use_container_width=True):
+        list_endpoint_models.clear()
+        st.rerun()
+    send_full_video = st.toggle("Send full video clip", value=True,
+                                help="Off: send only the peak-motion keyframe. Falls back to the keyframe if the model rejects video.")
+    disable_thinking = st.toggle("Fast mode (skip model reasoning)", value=True,
+                                 help="Sends enable_thinking=False to Nemotron reasoning models")
+
     st.divider()
     st.subheader("🔒 Sovereignty Verification")
     st.markdown('<span class="badge-airgap">AIR-GAPPED</span> <span class="badge-blackwell">GB10 BLACKWELL</span>', unsafe_allow_html=True)
@@ -215,7 +273,7 @@ t1, t2, t3, t4 = st.columns(4)
 t1.metric("Compute Silicon", "NVIDIA GB10 Superchip")
 t2.metric("Memory Subsystem", "Unified LPDDR5X")
 t3.metric("Network Interface", "Zero Cloud Egress (0 KB)")
-t4.metric("Engine Status", "ONLINE (Air-Gapped)")
+t4.metric("Engine Status", "ONLINE (Air-Gapped)" if available_models else "OFFLINE")
 
 st.divider()
 
@@ -227,6 +285,7 @@ with left_col:
     feed_mode = st.radio("Camera Source:", ["Simulated CCTV (Incident Clip)", "Upload Video", "Live Camera (Device 0)"], horizontal=True)
 
     active_frame = None
+    active_video_path = None
     source_name = None
     if feed_mode == "Upload Video":
         uploaded = st.file_uploader("Upload CCTV Clip:", type=[e.lstrip(".") for e in VIDEO_EXTS])
@@ -238,9 +297,10 @@ with left_col:
                 f.write(uploaded.getbuffer())
             st.video(upload_path)
             active_frame = extract_peak_motion_frame(upload_path)
+            active_video_path = upload_path
             source_name = os.path.basename(upload_path)
             if active_frame is not None:
-                st.image(active_frame, channels="BGR", caption="Peak-motion keyframe sent to the VLM", use_container_width=True)
+                st.image(active_frame, channels="BGR", caption="Peak-motion keyframe (fallback input)", use_container_width=True)
             else:
                 st.warning("Could not decode frames from this video.")
     elif feed_mode == "Simulated CCTV (Incident Clip)":
@@ -257,9 +317,10 @@ with left_col:
         if clip_files:
             st.video(clip_path)
             active_frame = extract_peak_motion_frame(clip_path)
+            active_video_path = clip_path
             source_name = clip_name
             if active_frame is not None:
-                st.image(active_frame, channels="BGR", caption="Peak-motion keyframe sent to the VLM", use_container_width=True)
+                st.image(active_frame, channels="BGR", caption="Peak-motion keyframe (fallback input)", use_container_width=True)
         else:
             # Fallback visual demo canvas
             synthetic_frame = np.zeros((360, 640, 3), dtype=np.uint8)
@@ -304,13 +365,16 @@ with right_col:
         frame_b64 = get_base64_frame(active_frame) if active_frame is not None else None
 
         with st.spinner("GB10 Grace Blackwell Processing (Local VLM + Vernacular Normalization)..."):
-            result_text, latency_ms = call_local_dgx_spark(
+            result_text, latency_ms, input_used = call_local_dgx_spark(
                 base_url=endpoint_url,
                 model_name=model_id,
                 user_prompt=incident_tip,
-                frame_base64=frame_b64
+                frame_base64=frame_b64,
+                video_path=active_video_path if send_full_video else None,
+                disable_thinking=disable_thinking
             )
-        results[result_key] = {"tip": incident_tip, "text": result_text, "latency_ms": latency_ms}
+        results[result_key] = {"tip": incident_tip, "text": result_text, "latency_ms": latency_ms,
+                               "input": input_used, "model": model_id}
 
     if result_key in results:
         res = results[result_key]
@@ -321,6 +385,7 @@ with right_col:
             st.success(f"Triage Complete in {res['latency_ms']:.1f} ms (Running 100% on NVIDIA GB10)")
         st.markdown(f"### 📋 Copilot Operational Assessment: `{result_key}`")
         st.metric("Severity Level", parse_severity(res["text"]))
+        st.caption(f"Model: `{res.get('model', '?')}` · Input: {res.get('input', 'Peak-motion keyframe')}")
         st.info(res["text"])
 
         # Human-in-the-Loop Approval Action Buttons
@@ -340,21 +405,25 @@ st.divider()
 st.subheader("🗂️ Batch Triage: All Sample & Uploaded Clips")
 batch_files = sorted(f for f in os.listdir(SAMPLE_VIDEO_DIR) if f.lower().endswith(VIDEO_EXTS)) \
     if os.path.isdir(SAMPLE_VIDEO_DIR) else []
-st.caption(f"{len(batch_files)} clip(s) in `{SAMPLE_VIDEO_DIR}/`. Each clip's peak-motion keyframe is sent with the incident tip above.")
+st.caption(f"{len(batch_files)} clip(s) in `{SAMPLE_VIDEO_DIR}/`. Each clip is sent in full (or as its peak-motion keyframe) with the incident tip above.")
 
 if st.button("▶️ Run Triage on All Clips", disabled=not batch_files):
     results = get_result_store()
     progress = st.progress(0.0, text="Starting batch triage...")
     for i, fname in enumerate(batch_files):
         progress.progress(i / len(batch_files), text=f"Triaging {fname} ({i + 1}/{len(batch_files)})...")
-        frame = extract_peak_motion_frame(os.path.join(SAMPLE_VIDEO_DIR, fname))
-        text, ms = call_local_dgx_spark(
+        clip_file = os.path.join(SAMPLE_VIDEO_DIR, fname)
+        frame = extract_peak_motion_frame(clip_file)
+        text, ms, input_used = call_local_dgx_spark(
             base_url=endpoint_url,
             model_name=model_id,
             user_prompt=incident_tip,
-            frame_base64=get_base64_frame(frame) if frame is not None else None
+            frame_base64=get_base64_frame(frame) if frame is not None else None,
+            video_path=clip_file if send_full_video else None,
+            disable_thinking=disable_thinking
         )
-        results[fname] = {"tip": incident_tip, "text": text, "latency_ms": ms}
+        results[fname] = {"tip": incident_tip, "text": text, "latency_ms": ms,
+                          "input": input_used, "model": model_id}
     progress.empty()
 
 all_results = get_result_store()
@@ -365,6 +434,8 @@ if batch_done:
             "Clip": f,
             "Severity": parse_severity(all_results[f]["text"]),
             "Latency (ms)": round(all_results[f]["latency_ms"]),
+            "Input": all_results[f].get("input", "Peak-motion keyframe"),
+            "Model": all_results[f].get("model", "?"),
             "Incident Tip": all_results[f]["tip"],
         } for f in batch_done],
         use_container_width=True,
@@ -378,6 +449,7 @@ if batch_done:
                 st.video(os.path.join(SAMPLE_VIDEO_DIR, f))
                 frame = extract_peak_motion_frame(os.path.join(SAMPLE_VIDEO_DIR, f))
                 if frame is not None:
-                    st.image(frame, channels="BGR", caption="Keyframe sent to the VLM", use_container_width=True)
+                    st.image(frame, channels="BGR", caption="Peak-motion keyframe (fallback input)", use_container_width=True)
             with txt_col:
+                st.caption(f"Model: `{res.get('model', '?')}` · Input: {res.get('input', 'Peak-motion keyframe')}")
                 (st.error if is_inference_error(res["text"]) else st.markdown)(res["text"])

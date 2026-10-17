@@ -1,0 +1,7 @@
+[browser]
+# Air-gapped deployment: no usage telemetry
+gatherUsageStats = false
+
+[server]
+# Max video upload size in MB
+maxUploadSize = 1024
