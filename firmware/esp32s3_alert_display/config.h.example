@@ -1,0 +1,13 @@
+// Copy this file to `config.h` (git-ignored) and fill in your own values.
+// The sketch will not compile without `config.h`.
+
+// Wi-Fi network shared with the machine that runs the Sentinel dashboard (2.4 GHz only).
+#define WIFI_SSID       "your-wifi-ssid"
+#define WIFI_PASSWORD   "your-wifi-password"
+
+// mDNS name: the display answers at http://<hostname>.local
+#define SENTINEL_HOSTNAME   "sentinel-display"
+
+// Shared secret the dashboard sends in the `X-Sentinel-Token` header.
+// Must match SENTINEL_DISPLAY_TOKEN on the dashboard side. Empty string disables the check.
+#define SENTINEL_TOKEN      "change-me"
