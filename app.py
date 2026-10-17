@@ -80,6 +80,10 @@ def get_base64_frame(frame: np.ndarray) -> str:
     _, buffer = cv2.imencode('.jpg', frame, [int(cv2.IMWRITE_JPEG_QUALITY), 80])
     return base64.b64encode(buffer).decode('utf-8')
 
+SAMPLE_VIDEO_DIR = "sample_videos"
+VIDEO_EXTS = (".mp4", ".mov", ".avi", ".mkv", ".webm")
+
+@st.cache_data(show_spinner=False)
 def extract_peak_motion_frame(video_path: str) -> Optional[np.ndarray]:
     """Sample frame with highest motion delta from a local video file."""
     if not os.path.exists(video_path):
@@ -201,17 +205,21 @@ with left_col:
     
     active_frame = None
     if feed_mode == "Simulated CCTV (Incident Clip)":
-        clip_name = st.selectbox("Select Camera Zone:", [
+        # List local incident clips from sample_videos/ (fall back to named demo zones)
+        clip_files = sorted(f for f in os.listdir(SAMPLE_VIDEO_DIR) if f.lower().endswith(VIDEO_EXTS)) \
+            if os.path.isdir(SAMPLE_VIDEO_DIR) else []
+        clip_name = st.selectbox("Select Camera Zone:", clip_files or [
             "CCTV 04: Rear Perimeter Fence (SMK Sentiasa)",
             "CCTV 02: Block B Corridor Stairs",
             "CCTV 01: Main Courtyard (Negative Control)"
         ])
-        
-        # Simulated placeholder frame if no video file
-        placeholder_path = "sample_videos/clip1_rear_gate_loitering.mp4"
-        if os.path.exists(placeholder_path):
-            st.video(placeholder_path)
-            active_frame = extract_peak_motion_frame(placeholder_path)
+
+        clip_path = os.path.join(SAMPLE_VIDEO_DIR, clip_name)
+        if clip_files:
+            st.video(clip_path)
+            active_frame = extract_peak_motion_frame(clip_path)
+            if active_frame is not None:
+                st.image(active_frame, channels="BGR", caption="Peak-motion keyframe sent to the VLM", use_container_width=True)
         else:
             # Fallback visual demo canvas
             synthetic_frame = np.zeros((360, 640, 3), dtype=np.uint8)
