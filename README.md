@@ -98,8 +98,8 @@ Configuration (optional environment variables):
 
 **Fast mode** (sidebar, on by default) sends `enable_thinking=False`. Nemotron reasoning models otherwise spend most of the token budget on hidden reasoning, which makes triage about 3× slower.
 
-### Fight Alert on the Waveshare ESP32-S3-Touch-LCD-5
-When the model confirms a fight in a clip, the dashboard pushes an alert over the local network to a [Waveshare ESP32-S3-Touch-LCD-5](https://www.waveshare.com/esp32-s3-touch-lcd-5.htm) (800×480 touch display). The screen flashes red and shows **"Fighting is detected. Please take immediate actions now!"** with the clip name, severity and time. Tap **ACKNOWLEDGE** on the screen to clear it.
+### Fight Alert on the Waveshare ESP32-S3-Touch-LCD-5 / 5B
+When the model confirms a fight in a clip, the dashboard pushes an alert over the local network to a [Waveshare ESP32-S3-Touch-LCD-5 / 5B](https://www.waveshare.com/esp32-s3-touch-lcd-5.htm) (5-inch touch display). The screen flashes red and shows **"Fighting is detected. Please take immediate actions now!"** with the clip name, severity and time. Tap **ACKNOWLEDGE** on the screen to clear it.
 
 ```
  clip ──► Nemotron VL (DGX Spark) ──► "FIGHT_DETECTED: YES" ──► dashboard ──HTTP POST /alert──► ESP32-S3 5" display
@@ -107,11 +107,13 @@ When the model confirms a fight in a clip, the dashboard pushes an alert over th
 
 **How the trigger works.** The system prompt asks the model to end every answer with `FIGHT_DETECTED: YES` or `FIGHT_DETECTED: NO`, judged from the footage only. The dashboard alerts only on an explicit `YES` for a result that included a clip, keyframe or snapshot. A missing verdict, `NO`, a text-only tip or an inference error never alerts, and the result shows *No verdict* so you can see the model skipped the line. A failed delivery shows the error with a **Resend Alert to Display** button. **Dismiss** also clears the display.
 
-**1. Flash the display** (Arduino IDE 2.x or `arduino-cli`):
-1. Install the **esp32 by Espressif Systems** board package (3.1.0 or later), then these libraries: `ESP32_Display_Panel` 1.0.x, `ESP32_IO_Expander` 1.x, `esp-lib-utils` (0.2.x or 0.3.x) and `lvgl` **8.4.0** (not 9.x). The sketch is compile-checked with esp32 core 3.3.12, `ESP32_Display_Panel` 1.0.4, `ESP32_IO_Expander` 1.1.1, `esp-lib-utils` 0.3.0 and `lvgl` 8.4.0.
-2. In `firmware/esp32s3_alert_display/`, copy `config.h.example` to `config.h` and set your 2.4 GHz Wi-Fi SSID/password and a shared token (`config.h` is git-ignored).
-3. Open `esp32s3_alert_display.ino` and select **ESP32S3 Dev Module** with: PSRAM **OPI PSRAM**, Flash Size **16MB**, Flash Mode **QIO 80MHz**, Partition Scheme **16M Flash (3MB APP/9.9MB FATFS)**, and USB CDC On Boot **Enabled** if you use the USB port. The sketch already enables the `BOARD_WAVESHARE_ESP32_S3_TOUCH_LCD_5` profile. For the 1024×600 "5B" model, enable `BOARD_WAVESHARE_ESP32_S3_TOUCH_LCD_5_B` in `esp_panel_board_supported_conf.h` instead.
-4. Upload. The serial monitor (115200 baud) prints the IP address, and the screen shows `http://sentinel-display.local`.
+**1. Flash the display** (Arduino IDE 2.x or `arduino-cli`). Verified on a Waveshare **ESP32-S3-Touch-LCD-5B (1024×600)**.
+1. Install the **esp32 by Espressif Systems** board package and these libraries: `ESP32_Display_Panel` 1.0.x, `ESP32_IO_Expander` 1.x, `esp-lib-utils` (0.2.x or 0.3.x) and `lvgl` **8.4.0** (not 9.x). The tested set is esp32 core **3.2.0**, `ESP32_Display_Panel` 1.0.4, `ESP32_IO_Expander` 1.1.1, `esp-lib-utils` 0.3.0 and `lvgl` 8.4.0.
+2. **Use Espressif's high-performance SDK build (needed on the 5B).** With Wi-Fi running, the 1024×600 RGB panel flickers on the stock SDK, because radio traffic competes with the screen refresh for PSRAM bandwidth. Download [`esp32-3.2.0-h.zip`](https://dl.espressif.com/AE/esp-arduino-libs/esp32-3.2.0-h.zip) (see [arduino-esp32-sdk](https://github.com/esp-arduino-libs/arduino-esp32-sdk)), unzip it, and replace the `esp32s3` folder inside `~/Library/Arduino15/packages/esp32/tools/esp32-arduino-libs/idf-release_v5.4-*/` with the one from the zip (keep a backup). It must match core 3.2.0; the build is not published for 3.3.x. The firmware also uses double-buffered anti-tearing, a 30-line RGB bounce buffer and Wi-Fi modem sleep to keep the panel steady.
+3. In `firmware/esp32s3_alert_display/`, copy `config.h.example` to `config.h` and set your 2.4 GHz Wi-Fi SSID/password and a shared token. `config.h` holds secrets: never commit it.
+4. Open `esp32s3_alert_display.ino` and select **ESP32S3 Dev Module** with: PSRAM **OPI PSRAM**, Flash Size **16MB**, Flash Mode **QIO 80MHz**, Partition Scheme **16M Flash (3MB APP/9.9MB FATFS)**, and USB CDC On Boot **Enabled** if you use the USB port. The sketch enables the `BOARD_WAVESHARE_ESP32_S3_TOUCH_LCD_5_B` profile. For the standard 800×480 model, switch to `BOARD_WAVESHARE_ESP32_S3_TOUCH_LCD_5` in `esp_panel_board_supported_conf.h`; a wrong profile gives a white screen with stray lines.
+5. Upload. If it fails or the USB drops mid-write, use a direct data cable (no hub), set Upload Speed to 115200, and if the board no longer connects, hold **BOOT**, press **RESET**, then release **BOOT** to enter download mode.
+6. The serial monitor (115200 baud) prints the IP address, and the screen shows `http://sentinel-display.local`. If `.local` names don't resolve on your network, use the IP address in the dashboard instead.
 
 **2. Point the dashboard at it.** Put the laptop and the display on the same network, then set the values below. They can also be edited in the sidebar under **ESP32 Alert Display**, which shows whether the display is online and has **Test alert** and **Clear display** buttons.
 
