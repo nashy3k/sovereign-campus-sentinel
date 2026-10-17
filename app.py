@@ -3,6 +3,7 @@ import sys
 import time
 import json
 import base64
+import re
 from typing import Optional, Tuple, Dict, Any
 
 import streamlit as st
@@ -115,6 +116,24 @@ def extract_peak_motion_frame(video_path: str) -> Optional[np.ndarray]:
     cap.release()
     return best_frame
 
+SEVERITY_LEVELS = ("CRITICAL", "HIGH", "MEDIUM", "LOW")
+
+@st.cache_resource
+def get_result_store() -> Dict[str, Dict[str, Any]]:
+    """Server-side triage results keyed by clip name; outlives browser sessions and reconnects."""
+    return {}
+
+def is_inference_error(text: str) -> bool:
+    return text.startswith("⚠️ Local Inference Error")
+
+def parse_severity(text: str) -> str:
+    """Pull the severity level from the copilot's free-form answer (first level mentioned after 'severity')."""
+    if is_inference_error(text):
+        return "ERROR"
+    idx = text.lower().find("severity")
+    match = re.search(r"\b(" + "|".join(SEVERITY_LEVELS) + r")\b", text[idx:] if idx >= 0 else text)
+    return match.group(1) if match else "UNKNOWN"
+
 def call_local_dgx_spark(
     base_url: str,
     model_name: str,
@@ -145,10 +164,14 @@ def call_local_dgx_spark(
             model=model_name,
             messages=messages,
             temperature=0.2,
-            max_tokens=300
+            max_tokens=4096
         )
         elapsed_ms = (time.perf_counter() - start_time) * 1000
-        return response.choices[0].message.content, elapsed_ms
+        content = response.choices[0].message.content
+        if not content:
+            # Reasoning models can spend the whole token budget thinking and return no answer
+            return "⚠️ Local Inference Error: model returned no answer (token budget exhausted?)", elapsed_ms
+        return content, elapsed_ms
     except Exception as e:
         elapsed_ms = (time.perf_counter() - start_time) * 1000
         return f"⚠️ Local Inference Error: {str(e)}", elapsed_ms
@@ -201,10 +224,26 @@ left_col, right_col = st.columns([1, 1], gap="medium")
 
 with left_col:
     st.subheader("📹 CCTV Feed & Peak-Motion Sampler")
-    feed_mode = st.radio("Camera Source:", ["Simulated CCTV (Incident Clip)", "Live Camera (Device 0)"], horizontal=True)
-    
+    feed_mode = st.radio("Camera Source:", ["Simulated CCTV (Incident Clip)", "Upload Video", "Live Camera (Device 0)"], horizontal=True)
+
     active_frame = None
-    if feed_mode == "Simulated CCTV (Incident Clip)":
+    source_name = None
+    if feed_mode == "Upload Video":
+        uploaded = st.file_uploader("Upload CCTV Clip:", type=[e.lstrip(".") for e in VIDEO_EXTS])
+        if uploaded:
+            # Save into sample_videos/ so OpenCV can read it and it joins the batch triage list
+            os.makedirs(SAMPLE_VIDEO_DIR, exist_ok=True)
+            upload_path = os.path.join(SAMPLE_VIDEO_DIR, os.path.basename(uploaded.name))
+            with open(upload_path, "wb") as f:
+                f.write(uploaded.getbuffer())
+            st.video(upload_path)
+            active_frame = extract_peak_motion_frame(upload_path)
+            source_name = os.path.basename(upload_path)
+            if active_frame is not None:
+                st.image(active_frame, channels="BGR", caption="Peak-motion keyframe sent to the VLM", use_container_width=True)
+            else:
+                st.warning("Could not decode frames from this video.")
+    elif feed_mode == "Simulated CCTV (Incident Clip)":
         # List local incident clips from sample_videos/ (fall back to named demo zones)
         clip_files = sorted(f for f in os.listdir(SAMPLE_VIDEO_DIR) if f.lower().endswith(VIDEO_EXTS)) \
             if os.path.isdir(SAMPLE_VIDEO_DIR) else []
@@ -218,6 +257,7 @@ with left_col:
         if clip_files:
             st.video(clip_path)
             active_frame = extract_peak_motion_frame(clip_path)
+            source_name = clip_name
             if active_frame is not None:
                 st.image(active_frame, channels="BGR", caption="Peak-motion keyframe sent to the VLM", use_container_width=True)
         else:
@@ -234,6 +274,7 @@ with left_col:
         if cam_input:
             bytes_data = cam_input.getvalue()
             active_frame = cv2.imdecode(np.frombuffer(bytes_data, np.uint8), cv2.IMREAD_COLOR)
+            source_name = "Live Camera Snapshot"
 
 with right_col:
     st.subheader("💬 Warden Incident Triage Copilot")
@@ -255,9 +296,13 @@ with right_col:
     with col_btn:
         triage_btn = st.button("🚀 Execute Sovereign Triage", type="primary", use_container_width=True)
     
+    # Results persist per source so they survive reruns, reconnects and the warden gate buttons
+    results = get_result_store()
+    result_key = source_name or "Text-only report"
+
     if triage_btn:
         frame_b64 = get_base64_frame(active_frame) if active_frame is not None else None
-        
+
         with st.spinner("GB10 Grace Blackwell Processing (Local VLM + Vernacular Normalization)..."):
             result_text, latency_ms = call_local_dgx_spark(
                 base_url=endpoint_url,
@@ -265,12 +310,19 @@ with right_col:
                 user_prompt=incident_tip,
                 frame_base64=frame_b64
             )
-        
+        results[result_key] = {"tip": incident_tip, "text": result_text, "latency_ms": latency_ms}
+
+    if result_key in results:
+        res = results[result_key]
         # Display Results
-        st.success(f"Triage Complete in {latency_ms:.1f} ms (Running 100% on NVIDIA GB10)")
-        st.markdown("### 📋 Copilot Operational Assessment")
-        st.info(result_text)
-        
+        if is_inference_error(res["text"]):
+            st.error(f"Triage Failed after {res['latency_ms']:.1f} ms")
+        else:
+            st.success(f"Triage Complete in {res['latency_ms']:.1f} ms (Running 100% on NVIDIA GB10)")
+        st.markdown(f"### 📋 Copilot Operational Assessment: `{result_key}`")
+        st.metric("Severity Level", parse_severity(res["text"]))
+        st.info(res["text"])
+
         # Human-in-the-Loop Approval Action Buttons
         st.write("**Human-in-the-Loop Warden Gate:**")
         act_col1, act_col2 = st.columns(2)
@@ -280,3 +332,52 @@ with right_col:
         with act_col2:
             if st.button("❌ Dismiss: False Positive / Normal", use_container_width=True):
                 st.toast("Alert Logged as Dismissed.", icon="ℹ️")
+
+# ==============================================================================
+# Batch Triage: every clip in sample_videos/ (including uploaded videos)
+# ==============================================================================
+st.divider()
+st.subheader("🗂️ Batch Triage: All Sample & Uploaded Clips")
+batch_files = sorted(f for f in os.listdir(SAMPLE_VIDEO_DIR) if f.lower().endswith(VIDEO_EXTS)) \
+    if os.path.isdir(SAMPLE_VIDEO_DIR) else []
+st.caption(f"{len(batch_files)} clip(s) in `{SAMPLE_VIDEO_DIR}/`. Each clip's peak-motion keyframe is sent with the incident tip above.")
+
+if st.button("▶️ Run Triage on All Clips", disabled=not batch_files):
+    results = get_result_store()
+    progress = st.progress(0.0, text="Starting batch triage...")
+    for i, fname in enumerate(batch_files):
+        progress.progress(i / len(batch_files), text=f"Triaging {fname} ({i + 1}/{len(batch_files)})...")
+        frame = extract_peak_motion_frame(os.path.join(SAMPLE_VIDEO_DIR, fname))
+        text, ms = call_local_dgx_spark(
+            base_url=endpoint_url,
+            model_name=model_id,
+            user_prompt=incident_tip,
+            frame_base64=get_base64_frame(frame) if frame is not None else None
+        )
+        results[fname] = {"tip": incident_tip, "text": text, "latency_ms": ms}
+    progress.empty()
+
+all_results = get_result_store()
+batch_done = [f for f in batch_files if f in all_results]
+if batch_done:
+    st.dataframe(
+        [{
+            "Clip": f,
+            "Severity": parse_severity(all_results[f]["text"]),
+            "Latency (ms)": round(all_results[f]["latency_ms"]),
+            "Incident Tip": all_results[f]["tip"],
+        } for f in batch_done],
+        use_container_width=True,
+        hide_index=True,
+    )
+    for f in batch_done:
+        res = all_results[f]
+        with st.expander(f"{parse_severity(res['text'])} · {f} · {res['latency_ms']:.0f} ms"):
+            vid_col, txt_col = st.columns([1, 2])
+            with vid_col:
+                st.video(os.path.join(SAMPLE_VIDEO_DIR, f))
+                frame = extract_peak_motion_frame(os.path.join(SAMPLE_VIDEO_DIR, f))
+                if frame is not None:
+                    st.image(frame, channels="BGR", caption="Keyframe sent to the VLM", use_container_width=True)
+            with txt_col:
+                (st.error if is_inference_error(res["text"]) else st.markdown)(res["text"])
