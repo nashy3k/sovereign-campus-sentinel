@@ -32,6 +32,15 @@ using namespace esp_panel::drivers;
 using namespace esp_panel::board;
 
 #define ALERT_MESSAGE        "Fighting is detected. Please take immediate actions now!"
+
+// Demo mode (set DEMO_MODE 1 in config.h): the red alert screen is always on. Acknowledging (or POST /clear)
+// shows the monitoring screen for DEMO_REALERT_DELAY_MS, then the alert comes back by itself.
+#ifndef DEMO_MODE
+#define DEMO_MODE            0
+#endif
+#ifndef DEMO_REALERT_DELAY_MS
+#define DEMO_REALERT_DELAY_MS  60000
+#endif
 #define WIFI_CONNECT_TIMEOUT_MS  20000
 #define WIFI_RETRY_INTERVAL_MS   10000
 #define FIELD_MAX_LEN        60
@@ -53,6 +62,8 @@ static lv_timer_t *flash_timer;
 static volatile bool alert_active = false;
 static volatile uint32_t alert_count = 0;  // alerts received since the last acknowledge
 static bool flash_phase = false;
+static bool demo_realert_pending = false;
+static uint32_t demo_realert_at_ms = 0;
 static bool wifi_was_connected = false;
 static uint32_t last_wifi_retry_ms = 0;
 
@@ -62,7 +73,9 @@ static uint32_t last_wifi_retry_ms = 0;
 // ---------------------------------------------------------------------------------------------
 static void idle_detail_text(char *out, size_t len)
 {
-    if (WiFi.status() == WL_CONNECTED) {
+    if (DEMO_MODE && demo_realert_pending) {
+        snprintf(out, len, "Demo mode: alert returns in %lu s", (unsigned long)(DEMO_REALERT_DELAY_MS / 1000));
+    } else if (WiFi.status() == WL_CONNECTED) {
         snprintf(out, len, "Monitoring - no active alert\nhttp://%s.local  (%s)",
                  SENTINEL_HOSTNAME, WiFi.localIP().toString().c_str());
     } else {
@@ -75,6 +88,8 @@ static void show_idle()
     char detail[160];
     alert_active = false;
     alert_count = 0;
+    demo_realert_pending = DEMO_MODE;
+    demo_realert_at_ms = millis() + DEMO_REALERT_DELAY_MS;
     lv_timer_pause(flash_timer);
 
     lv_obj_set_style_bg_color(lv_scr_act(), COLOR_IDLE_BG, 0);
@@ -84,6 +99,20 @@ static void show_idle()
     idle_detail_text(detail, sizeof(detail));
     lv_label_set_text(ui_detail, detail);
     lv_obj_add_flag(ui_ack_btn, LV_OBJ_FLAG_HIDDEN);
+}
+
+static void apply_alert_ui(const char *detail)
+{
+    alert_active = true;
+    demo_realert_pending = false;
+    flash_phase = false;
+    lv_obj_set_style_bg_color(lv_scr_act(), COLOR_ALERT_A, 0);
+    lv_label_set_text(ui_icon, LV_SYMBOL_WARNING);
+    lv_obj_set_style_text_color(ui_icon, lv_color_white(), 0);
+    lv_label_set_text(ui_headline, ALERT_MESSAGE);
+    lv_label_set_text(ui_detail, detail);
+    lv_obj_clear_flag(ui_ack_btn, LV_OBJ_FLAG_HIDDEN);
+    lv_timer_resume(flash_timer);
 }
 
 static void show_alert(const String &clip, const String &severity, const String &when)
@@ -98,17 +127,14 @@ static void show_alert(const String &clip, const String &severity, const String 
     if (alert_count > 0 && n > 0 && (size_t)n < sizeof(detail)) {  // a previous alert was never acknowledged
         snprintf(detail + n, sizeof(detail) - n, "   (+%lu earlier unacknowledged)", (unsigned long)alert_count);
     }
-
-    alert_active = true;
     alert_count = alert_count + 1;
-    flash_phase = false;
-    lv_obj_set_style_bg_color(lv_scr_act(), COLOR_ALERT_A, 0);
-    lv_label_set_text(ui_icon, LV_SYMBOL_WARNING);
-    lv_obj_set_style_text_color(ui_icon, lv_color_white(), 0);
-    lv_label_set_text(ui_headline, ALERT_MESSAGE);
-    lv_label_set_text(ui_detail, detail);
-    lv_obj_clear_flag(ui_ack_btn, LV_OBJ_FLAG_HIDDEN);
-    lv_timer_resume(flash_timer);
+    apply_alert_ui(detail);
+}
+
+// Demo mode standing alert: not a real detection, so it does not count as a pending alert
+static void show_demo_alert()
+{
+    apply_alert_ui("DEMO MODE - standing alert");
 }
 
 static void flash_timer_cb(lv_timer_t *)
@@ -323,9 +349,14 @@ void setup()
 
     lvgl_port_lock(-1);
     build_ui();
+    if (DEMO_MODE) {
+        show_demo_alert();  // red alert is on from power-up, even before Wi-Fi is up
+    }
     lvgl_port_unlock();
 
-    show_boot_status("Connecting to Wi-Fi...");
+    if (!DEMO_MODE) {
+        show_boot_status("Connecting to Wi-Fi...");
+    }
     WiFi.mode(WIFI_STA);
     WiFi.setHostname(SENTINEL_HOSTNAME);
     WiFi.setSleep(true);   // modem sleep: far less radio activity competing with the RGB panel for memory bandwidth
@@ -355,5 +386,14 @@ void loop()
 {
     server.handleClient();
     watch_wifi();
+    if (DEMO_MODE && demo_realert_pending && (int32_t)(millis() - demo_realert_at_ms) >= 0) {
+        if (lvgl_port_lock(1000)) {
+            if (demo_realert_pending && !alert_active) {
+                show_demo_alert();
+                Serial.println("Demo mode: alert is back");
+            }
+            lvgl_port_unlock();
+        }
+    }
     delay(10);  // 10 ms is plenty for alerts; polling faster only adds memory-bus contention
 }

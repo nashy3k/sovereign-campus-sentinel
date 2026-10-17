@@ -11,3 +11,8 @@
 // Shared secret the dashboard sends in the `X-Sentinel-Token` header.
 // Must match SENTINEL_DISPLAY_TOKEN on the dashboard side. Empty string disables the check.
 #define SENTINEL_TOKEN      "change-me"
+
+// Demo mode: 1 = the red flashing alert screen is always on. After ACKNOWLEDGE (or POST /clear) the monitoring
+// screen shows for DEMO_REALERT_DELAY_MS, then the alert comes back. 0 = normal behaviour (alert only on detection).
+#define DEMO_MODE               0
+#define DEMO_REALERT_DELAY_MS   60000
