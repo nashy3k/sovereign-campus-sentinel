@@ -115,6 +115,8 @@ When the model confirms a fight in a clip, the dashboard pushes an alert over th
 5. Upload. If it fails or the USB drops mid-write, use a direct data cable (no hub), set Upload Speed to 115200, and if the board no longer connects, hold **BOOT**, press **RESET**, then release **BOOT** to enter download mode.
 6. The serial monitor (115200 baud) prints the IP address, and the screen shows `http://sentinel-display.local`. If `.local` names don't resolve on your network, use the IP address in the dashboard instead.
 
+**Demo mode (optional).** Set `#define DEMO_MODE 1` in `config.h` and the red flashing alert screen is always on from power-up, even before any fight is detected. After **ACKNOWLEDGE** (or `POST /clear`) the monitoring screen shows for `DEMO_REALERT_DELAY_MS` (default 60000 = one minute), then the alert comes back by itself. A real alert from the dashboard still replaces the standing one with its clip and severity. The standing demo alert does not count as a pending alert in `/status`. Leave `DEMO_MODE` at `0` for real use.
+
 **2. Point the dashboard at it.** Put the laptop and the display on the same network, then set the values below. They can also be edited in the sidebar under **ESP32 Alert Display**, which shows whether the display is online and has **Test alert** and **Clear display** buttons.
 
 | Variable | Default | Purpose |
