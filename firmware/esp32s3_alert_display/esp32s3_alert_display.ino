@@ -1,6 +1,7 @@
 /**
  * Sovereign Campus Sentinel - Fight Alert Display
- * Target: Waveshare ESP32-S3-Touch-LCD-5 (800x480 RGB LCD, GT911 touch)
+ * Target: Waveshare ESP32-S3-Touch-LCD-5 (800x480) or -5B (1024x600), RGB LCD with GT911 touch.
+ * The board profile is chosen in esp_panel_board_supported_conf.h; the layout scales to either.
  *
  * Joins the local Wi-Fi and exposes a tiny HTTP API. When the Sentinel dashboard confirms a
  * fight in a CCTV clip it POSTs /alert and this screen flashes red with the warning message.
@@ -124,31 +125,34 @@ static void ack_btn_cb(lv_event_t *)
 static void build_ui()
 {
     lv_obj_t *scr = lv_scr_act();
+    // Layout offsets are designed for a 480 px tall panel and scaled for taller ones (5B is 600 px)
+    const lv_coord_t v_scale_pct = lv_disp_get_ver_res(NULL) * 100 / 480;
+    auto scaled = [v_scale_pct](lv_coord_t px) { return (lv_coord_t)(px * v_scale_pct / 100); };
     lv_obj_clear_flag(scr, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_set_style_bg_opa(scr, LV_OPA_COVER, 0);
     lv_obj_set_style_text_color(scr, lv_color_white(), 0);
 
     ui_icon = lv_label_create(scr);
     lv_obj_set_style_text_font(ui_icon, &lv_font_montserrat_48, 0);
-    lv_obj_align(ui_icon, LV_ALIGN_TOP_MID, 0, 20);
+    lv_obj_align(ui_icon, LV_ALIGN_TOP_MID, 0, scaled(20));
 
     ui_headline = lv_label_create(scr);
     lv_label_set_long_mode(ui_headline, LV_LABEL_LONG_WRAP);
-    lv_obj_set_width(ui_headline, 740);
+    lv_obj_set_width(ui_headline, LV_PCT(92));
     lv_obj_set_style_text_align(ui_headline, LV_TEXT_ALIGN_CENTER, 0);
     lv_obj_set_style_text_font(ui_headline, &lv_font_montserrat_48, 0);
-    lv_obj_align(ui_headline, LV_ALIGN_CENTER, 0, -25);
+    lv_obj_align(ui_headline, LV_ALIGN_CENTER, 0, -scaled(25));
 
     ui_detail = lv_label_create(scr);
     lv_label_set_long_mode(ui_detail, LV_LABEL_LONG_WRAP);
-    lv_obj_set_width(ui_detail, 740);
+    lv_obj_set_width(ui_detail, LV_PCT(92));
     lv_obj_set_style_text_align(ui_detail, LV_TEXT_ALIGN_CENTER, 0);
     lv_obj_set_style_text_font(ui_detail, &lv_font_montserrat_24, 0);
-    lv_obj_align(ui_detail, LV_ALIGN_CENTER, 0, 110);
+    lv_obj_align(ui_detail, LV_ALIGN_CENTER, 0, scaled(110));
 
     ui_ack_btn = lv_btn_create(scr);
-    lv_obj_set_size(ui_ack_btn, 320, 64);
-    lv_obj_align(ui_ack_btn, LV_ALIGN_BOTTOM_MID, 0, -16);
+    lv_obj_set_size(ui_ack_btn, 360, scaled(72));
+    lv_obj_align(ui_ack_btn, LV_ALIGN_BOTTOM_MID, 0, -scaled(16));
     lv_obj_set_style_bg_color(ui_ack_btn, lv_color_white(), 0);
     lv_obj_add_event_cb(ui_ack_btn, ack_btn_cb, LV_EVENT_CLICKED, NULL);
     lv_obj_t *ack_label = lv_label_create(ui_ack_btn);
